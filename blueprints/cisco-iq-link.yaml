@@ -1,10 +1,10 @@
 spec_version: 2
 description: >
-  Cisco IQ Link on VMware vCenter. Deploys the Cisco IQ Link vSphere OVA (as shipped by Cisco),
-  applies the getting-started-guide VM settings (full memory reservation, CPU shares Low,
-  thick disks), then completes the first-boot console network setup (IP, gateway, DNS,
-  search domain, NTP, admin password) unattended with govc keystrokes. Ends with the
-  IQ Link installer URL; pairing with Cisco IQ (Device ID + claim code) stays a manual step.
+  Cisco IQ Link on VMware vCenter. Validates the inputs, deploys the Cisco IQ Link vSphere OVA exactly
+  as shipped by Cisco, applies the getting-started-guide VM settings (thick disks, full memory
+  reservation, CPU shares Low), completes the first-boot console network setup unattended with govc
+  keystrokes and OCR, and waits for the IQ Link installer. Pairing with Cisco IQ (Device ID + claim code)
+  stays a manual step.
 
 inputs:
   Target:
@@ -42,7 +42,7 @@ inputs:
     validation-description: Optional
 
   Host:
-    description: ESXi host. Required for standalone placement; on clusters with vSphere HA or manual DRS, Cisco requires pinning the VM to a host.
+    description: ESXi host. Required for standalone placement. On clusters with vSphere HA or manual DRS, Cisco requires pinning the VM to a host.
     depends-on: Target, Datacenter
     type: input-source
     source-name: vcenter
@@ -76,7 +76,9 @@ inputs:
     validation-description: Optional
 
   Network:
-    description: Port group for the IQ Link management interface (mapped to the OVA network "DHCP Network"). Needs outbound TCP 443 to iq.cisco.com and the regional *.iq.cisco.com server, plus DNS/NTP.
+    description: >
+      Port group for the IQ Link management interface (mapped to the OVA network "DHCP Network").
+      Needs outbound TCP 443 to iq.cisco.com and the regional *.iq.cisco.com server, plus DNS and NTP.
     depends-on: Target, Datacenter
     type: input-source
     source-name: vcenter
@@ -86,16 +88,18 @@ inputs:
     - filter_datacenter: '{{ .inputs.["Datacenter"] }}'
 
   VM Name:
-    description: Name of the IQ Link VM (lowercase letters, digits, hyphens).
+    description: VM name prefix; the environment ID is appended (e.g. cisco-iq-link-AbC123xyz).
     type: string
     default: cisco-iq-link
-    pattern: '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
-    validation-description: Lowercase letters, digits and hyphens; must start and end with a letter or digit
+    pattern: '^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$'
+    validation-description: Lowercase letters, digits and hyphens (max 40); must start and end with a letter or digit
 
   OVA URL:
     description: Cisco IQ Link vSphere OVA, reachable over HTTP(S) from the management server.
     type: string
     default: http://ec2-34-207-244-85.compute-1.amazonaws.com/cisco-iq-link-vsphere-1.2.4-v1.2.4017.ova
+    pattern: '^https?://\S+\.ova$'
+    validation-description: HTTP(S) URL ending in .ova
 
   IQ Link Version:
     description: Release line of the OVA. 1.3.x asks an extra NTP poll-frequency question on the console.
@@ -107,7 +111,7 @@ inputs:
   Deployment Size:
     description: >
       vCPU/RAM. "OVA default" keeps what the OVA ships with (16 vCPU / 32 GB for 1.2.4017).
-      Other sizes follow the current Cisco IQ Link getting started guide:
+      The other sizes follow the current Cisco IQ Link getting started guide:
       1K = 6 vCPU/12 GB, 10K = 8 vCPU/16 GB, 20K = 8 vCPU/18 GB, 50K = 12 vCPU/24 GB.
     type: string
     allowed-values: ["OVA default", "1K devices", "10K devices", "20K devices", "50K devices"]
@@ -127,7 +131,7 @@ inputs:
     validation-description: IPv4/prefix, e.g. 10.122.226.150/24
 
   Gateway:
-    description: Default gateway IPv4 address
+    description: Default gateway IPv4 address (must be inside the management subnet)
     type: string
     pattern: '^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$'
     validation-description: IPv4 address
@@ -151,21 +155,36 @@ inputs:
     pattern: '^[A-Za-z0-9.-]+(,[A-Za-z0-9.-]+)*$'
     validation-description: One or more hostnames/IPs, comma-separated, no spaces
 
+  Reverse DNS Check:
+    description: IQ Link requires a PTR record for the management IP. "Warn" logs a warning if it is missing; "Enforce" stops before anything is deployed.
+    type: string
+    style: radio
+    allowed-values: [Warn, Enforce]
+    default: Warn
+
   Admin Password:
     description: >
-      New IQ Link admin password. At least 15 characters with 2+ uppercase, 2+ lowercase, 2+ digits
-      and 2+ special characters, no repeated consecutive characters, US-keyboard ASCII only.
+      New IQ Link admin password: 15+ characters with 2+ uppercase, 2+ lowercase, 2+ digits and
+      2+ special characters, no character repeated consecutively, printable US-keyboard ASCII
+      without spaces (it is typed as keystrokes). Fully checked by the precheck step.
     type: string
     sensitive: true
+    pattern: '^[!-~]{15,}$'
+    validation-description: 15+ printable ASCII characters, no spaces (full policy is checked before deployment)
 
 outputs:
   IQ Link Installer:
     kind: link
+    quick: true
     value: 'https://{{ .grains["iqlink-day0"].activities.deploy.commands.day0.outputs.mgmt_ip }}'
   Management IP:
+    quick: true
     value: '{{ .grains["iqlink-day0"].activities.deploy.commands.day0.outputs.mgmt_ip }}'
   VM Name:
+    quick: true
     value: '{{ .grains["iqlink-vm"].outputs.vm_name }}'
+  Installer Status:
+    value: '{{ .grains["health-check"].activities.deploy.commands.check.outputs.installer_status }}'
   vCPUs:
     value: '{{ .grains["iqlink-vm"].outputs.num_cpu }}'
   Memory (MB):
@@ -175,16 +194,40 @@ outputs:
   OVA:
     value: '{{ .grains["iqlink-vm"].outputs.ova_file }}'
   Next Step:
-    value: 'Open the IQ Link Installer, choose your region, test connectivity, then pair with Cisco IQ (Home > System Settings > Data Connectors > Add Cisco IQ Link) within 5 minutes of the claim code appearing.'
+    value: 'Open the IQ Link Installer, choose your region and test connectivity, then pair it in Cisco IQ (Home > System Settings > Data Connectors > Add Cisco IQ Link) within 5 minutes of the claim code appearing.'
 
 grains:
 
+  # ── 0. Precheck: fail in seconds, before the 8 GB download ──────────────────
+  # Password policy, gateway in subnet, management IP free, reverse DNS, OVA reachable.
+  precheck:
+    kind: shell
+    spec:
+      target:
+        name: '{{ .inputs.["Target"] }}'
+      files:
+      - source: cisco-iq-stackautomation
+        path: scripts/iqlink_precheck.sh
+      env-vars:
+      - MGMT_IP_CIDR: '{{ .inputs.["Management IP"] }}'
+      - GATEWAY: '{{ .inputs.["Gateway"] }}'
+      - DNS_LIST: '{{ .inputs.["DNS Servers"] }}'
+      - NTP_LIST: '{{ .inputs.["NTP Servers"] }}'
+      - ADMIN_PASSWORD: '{{ .inputs.["Admin Password"] }}'
+      - OVA_URL: '{{ .inputs.["OVA URL"] }}'
+      - REQUIRE_PTR: '{% if .inputs.["Reverse DNS Check"] == "Enforce" %}true{% else %}false{% endif %}'
+      activities:
+        deploy:
+          commands:
+          - 'bash ./iqlink_precheck.sh'
+
   # ── 1. Deploy the OVA ───────────────────────────────────────────────────────
-  # download-ova.sh caches the OVA on the runner before terraform init; the module
-  # deploys it with local_ovf_path. Guest-network waits are 0 because the appliance
-  # blocks at its first-boot console until the Day 0 grain configures it.
+  # download-ova.sh caches the OVA on the runner before terraform init; the module deploys it
+  # with local_ovf_path. Guest-network waits are 0 because the appliance blocks at its
+  # first-boot console until the Day 0 grain configures it.
   iqlink-vm:
     kind: terraform
+    depends-on: precheck
     spec:
       source:
         store: cisco-iq-stackautomation
@@ -199,15 +242,18 @@ grains:
           source:
             store: cisco-iq-stackautomation
             path: scripts/download-ova.sh
+        # Destroy needs local_ovf_path to exist; if the cached OVA is gone, an empty
+        # placeholder lets the provider read its config and delete the VM.
         pre-tf-destroy:
           arguments: '{{ .inputs.["OVA URL"] }} --placeholder'
           source:
             store: cisco-iq-stackautomation
             path: scripts/download-ova.sh
       inputs:
-      - vm_name: '{{ .inputs.["VM Name"] }}'
+      - vm_name: '{{ .inputs.["VM Name"] }}-{{ .envId }}'
       - ova_url: '{{ .inputs.["OVA URL"] }}'
       - datacenter: '{{ .inputs.["Datacenter"] }}'
+      # Gated here, not on the form: a single-option input source cannot be cleared in the UI.
       - cluster: '{% if .inputs.Placement == "Cluster" %}{{ .inputs.["Cluster"] }}{% endif %}'
       - host: '{{ .inputs.["Host"] }}'
       - datastore: '{{ .inputs.["Datastore"] }}'
@@ -226,11 +272,13 @@ grains:
       - datacenter
       - disk_provisioning
       - ova_file
+      tags:
+        auto-tag: false
 
   # ── 2. Day 0: first-boot console setup ──────────────────────────────────────
-  # The shipped OVA has no vApp/OVF properties (no "Customize template" step), so the
-  # network settings can only be entered on the console. This grain types them with
-  # govc vm.keystrokes and reads the screen with OCR (see screenshots/README.md).
+  # The shipped OVA has no vApp/OVF properties (no "Customize template" step), so the network
+  # settings can only be entered on the console. govc vm.keystrokes types them; OCR on console
+  # screenshots confirms each prompt first (see screenshots/README.md for the sequence).
   iqlink-day0:
     kind: shell
     depends-on: iqlink-vm
@@ -258,9 +306,10 @@ grains:
               set -eo pipefail
               log() { echo "[$(date -u +%H:%M:%S)] $*"; }
 
-              # govc: use the runner's copy, else install a pinned release.
+              # govc: the runner's copy, a cached copy, or a pinned release.
               GOVC_VERSION=0.36.3
               if command -v govc >/dev/null; then export GOVC="$(command -v govc)"
+              elif [ -x "$HOME/.local/bin/govc" ]; then export GOVC="$HOME/.local/bin/govc"
               else
                 mkdir -p "$HOME/.local/bin"
                 curl -fsSL "https://github.com/vmware/govmomi/releases/download/v${GOVC_VERSION}/govc_Linux_x86_64.tar.gz" | tar -xz -C "$HOME/.local/bin" govc
@@ -268,8 +317,17 @@ grains:
               fi
               log "govc: $($GOVC version)"
 
-              # OCR for prompt detection (best effort; the script falls back to fixed delays).
-              command -v tesseract >/dev/null || { apt-get install -y tesseract-ocr >/dev/null 2>&1 || (apt-get update >/dev/null 2>&1 && apt-get install -y tesseract-ocr >/dev/null 2>&1) || log "WARNING: tesseract unavailable"; }
+              # OCR (best effort; without it the script uses fixed delays). Same approach as the
+              # catalog's ThousandEyes blueprint: tesseract from the OS, Pillow for preprocessing.
+              if ! command -v tesseract >/dev/null; then
+                if command -v apt-get >/dev/null; then (apt-get update -qq && apt-get install -y -qq tesseract-ocr python3-pil) >/dev/null 2>&1 || true
+                elif command -v dnf >/dev/null; then dnf install -y -q tesseract python3-pillow >/dev/null 2>&1 || true
+                elif command -v yum >/dev/null; then yum install -y -q tesseract python3-pillow >/dev/null 2>&1 || true
+                elif command -v apk >/dev/null; then apk add --no-cache tesseract-ocr py3-pillow >/dev/null 2>&1 || true
+                fi
+              fi
+              python3 -c 'import PIL' 2>/dev/null || pip3 install -q Pillow >/dev/null 2>&1 || pip install -q Pillow >/dev/null 2>&1 || true
+              command -v tesseract >/dev/null && log "OCR: $(tesseract --version 2>&1 | head -1)" || log "WARNING: tesseract unavailable - using fixed delays"
 
               # vCenter credentials come from the target (VSPHERE_*); govc wants a hostname.
               export GOVC_URL="${VSPHERE_SERVER#https://}" GOVC_USERNAME="$VSPHERE_USER" GOVC_PASSWORD="$VSPHERE_PASSWORD"
@@ -280,19 +338,144 @@ grains:
               [ -n "$VM_PATH" ] || { log "ERROR: VM $VM_NAME not found under /${DATACENTER}/vm"; exit 1; }
               export VM_NAME="$VM_PATH"
 
-              # Reverse DNS is required by IQ Link; warn early if the PTR record is missing.
-              IP="${MGMT_IP_CIDR%/*}"
-              python3 -c "import socket,sys; print('PTR', socket.gethostbyaddr(sys.argv[1])[0])" "$IP" 2>/dev/null \
-                || log "WARNING: no reverse DNS (PTR) for $IP as seen from the management server"
-
               bash ./iqlink_day0_console.sh
-              export mgmt_ip="$IP"
+              export mgmt_ip="${MGMT_IP_CIDR%/*}"
               log "Day 0 complete: https://${mgmt_ip}"
             outputs:
             - mgmt_ip
-        destroy:
+
+  # ── 3. Health check: wait for the IQ Link installer UI ──────────────────────
+  health-check:
+    kind: shell
+    depends-on: iqlink-day0
+    spec:
+      target:
+        name: '{{ .inputs.["Target"] }}'
+      env-vars:
+      - TARGET_IP: '{{ .grains["iqlink-day0"].activities.deploy.commands.day0.outputs.mgmt_ip }}'
+      activities:
+        deploy:
           commands:
-          - 'echo "Nothing to undo; the VM is removed by the iqlink-vm grain."'
+          - name: check
+            command: |
+              set -e
+              log() { echo "[$(date -u +%H:%M:%S)] $*"; }
+              export no_proxy="${no_proxy:+${no_proxy},}${TARGET_IP}" NO_PROXY="${NO_PROXY:+${NO_PROXY},}${TARGET_IP}"
+              log "Waiting for https://${TARGET_IP} (up to 30 min)"
+              for i in $(seq 1 180); do
+                HTTP=$(curl -sk -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 --noproxy "${TARGET_IP}" "https://${TARGET_IP}/" 2>/dev/null || echo 000)
+                if echo "$HTTP" | grep -qE '^(200|301|302|401|403)$'; then
+                  log "IQ Link installer reachable (HTTP ${HTTP})"
+                  export installer_status="Reachable (HTTP ${HTTP})"
+                  break
+                fi
+                [ $((i % 6)) -eq 0 ] && log "attempt ${i}/180: HTTP ${HTTP}"
+                sleep 10
+              done
+              if [ -z "${installer_status:-}" ]; then
+                log "WARNING: https://${TARGET_IP} not reachable from the management server after 30 min."
+                log "         The appliance may still be starting; check the VM console."
+                export installer_status="Not reachable from the management server yet"
+              fi
+            outputs:
+            - installer_status
+
+customization:
+  launch-form:
+    steps:
+      tags:
+        visible: false
+      workflows:
+        visible: false
+      ownersAndCollaborators:
+        visible: false
+    sections:
+    - name: IQ Link Appliance
+      inputs:
+      - name: VM Name
+      - name: OVA URL
+      - name: IQ Link Version
+      - name: Deployment Size
+      - name: Disk Provisioning
+      - name: Admin Password
+    - name: Infrastructure
+      inputs:
+      - name: Datacenter
+      - name: Placement
+      - name: Cluster
+        visible: '{% if inputs.Placement == "Cluster" %} true {% else %} false {% endif %}'
+      - name: Host
+      - name: Datastore
+      - name: Folder
+      - name: Network
+    - name: IP Configuration
+      inputs:
+      - name: Management IP
+      - name: Gateway
+      - name: DNS Servers
+      - name: Search Domain
+      - name: NTP Servers
+      - name: Reverse DNS Check
+  layout:
+    cards:
+    - name: stack1
+      display_name: Overview
+      type: stack-card
+      height: 2.8
+      items:
+      - name: server_info
+        display_name: '{{ environment.name }}'
+        status: '{% if environment.status == "Active" %}positive{% elsif environment.status == "Ended" or environment.status == "Force Ended" %}inactive{% elsif environment.status == "Launching" or environment.status == "Terminating" or environment.status == "Updating" %}info{% else %}warning{% endif %}'
+        type: icon-card
+        image: https://raw.githubusercontent.com/QualiTorque/Torque-Samples/refs/heads/main/icons/cisco-white.svg
+        data:
+        - name: Target
+          value: '{{ inputs["Target"] }}'
+        - name: Size
+          value: '{{ inputs["Deployment Size"] }}'
+      - name: drift
+        display_name: Deployment Drift
+        type: drift-card
+        height: 1.6
+        grains:
+        - iqlink-vm
+    - name: details
+      display_name: Access Details
+      type: data-card
+      height: 2.8
+      data:
+      - name: IQ Link Installer
+        action:
+          icon: Link
+          url: 'https://{{ outputs["Management IP"] }}'
+        value: 'https://{{ outputs["Management IP"] }}'
+      - name: VM Name
+        value: '{{ outputs["VM Name"] }}'
+      - name: Installer Status
+        value: '{{ outputs["Installer Status"] }}'
+    - name: Solution
+      type: blueprint-card
+      height: 2.8
+      size: 2.1
+      blueprint: '{{ environment.blueprint.name }}'
+    - name: servers
+      display_name: Compute Resources
+      type: resource-card
+      height: 2
+      size: 4
+      items:
+      - name: vCPUs
+        icon: Cpu
+        value: '{{ outputs["vCPUs"] }}'
+      - name: Memory
+        icon: Memory
+        value: '{{ outputs["Memory (MB)"] }} MB'
+    exclude:
+      grains:
+      - precheck
+      - iqlink-vm
+      - iqlink-day0
+      - health-check
 
 instructions:
   source:
@@ -300,9 +483,21 @@ instructions:
     path: instructions/cisco-iq-link.md
 
 labels:
+- vSphere: ''
 - Platform: vCenter
-- Provider: Cisco
-- Product: Cisco IQ Link
+- Infrastructure: Monitoring
+- service-type: Applications
+- image-based: true
 
 metadata:
+  self-service:
+  - Cisco-IQ
+  blueprint-labels:
+  - key: Platform
+    value: vCenter
+  - initial-color: '#e5e5e8'
+    key: Provider
+    value: Cisco
+  - key: Category
+    value: Monitoring
   display-name: Cisco IQ Link

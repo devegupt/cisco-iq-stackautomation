@@ -41,18 +41,35 @@ validate_password() {
 
 have_ocr() { command -v tesseract >/dev/null; }
 
+# Preprocess like the Cisco catalog blueprints (3x upscale, grayscale, invert, threshold):
+# tested on screenshots/02-console-day0, it recovers clipped first letters and misread words.
+preprocess() {
+  python3 - "$1" "$2" 2>/dev/null <<'PY'
+import sys
+from PIL import Image, ImageOps
+img = Image.open(sys.argv[1]).convert("RGB")
+img = img.resize((img.width * 3, img.height * 3), Image.LANCZOS)
+ImageOps.invert(img.convert("L")).point(lambda x: 255 if x > 100 else 0).save(sys.argv[2])
+PY
+}
+
 screen_text() {
   have_ocr || return 1
   "$GOVC" vm.console -capture "$WORKDIR/screen.png" "$VM_NAME" >/dev/null 2>&1 || return 1
-  tesseract "$WORKDIR/screen.png" - 2>/dev/null
+  if preprocess "$WORKDIR/screen.png" "$WORKDIR/screen-bw.png"; then
+    (cd "$WORKDIR" && tesseract screen-bw.png - 2>/dev/null; tesseract screen.png - 2>/dev/null)
+  else
+    (cd "$WORKDIR" && tesseract screen.png - 2>/dev/null)
+  fi
 }
 
 # The current prompt is at the bottom; earlier prompts stay visible above it.
-current_prompt() { screen_text | grep -v '^[[:space:]]*$' | tail -n 3; }
+current_prompt() { screen_text | grep -v '^[[:space:]]*$' | tail -n 8; }
 
 save_failure_screen() {
   local out="./iqlink-day0-fail-$(date +%s).png"
-  "$GOVC" vm.console -capture "$out" "$VM_NAME" >/dev/null 2>&1 && log "console screenshot saved: $out"
+  "$GOVC" vm.console -capture "$out" "$VM_NAME" >/dev/null 2>&1 && log "console screenshot saved on the runner: $out"
+  if have_ocr; then log "last console screen (OCR):"; screen_text | grep -v '^[[:space:]]*$' | tail -n 15 | sed 's/^/[screen] /' >&2 || true; fi
 }
 
 # wait_for <regex> <timeout_s>
@@ -76,13 +93,22 @@ type_line() { # type text then Enter; empty string = just Enter
 
 port_open() {
   if command -v nc >/dev/null; then nc -z -w 3 "$1" "$2" 2>/dev/null
-  else curl -sk --connect-timeout 3 -o /dev/null "telnet://$1:$2" 2>/dev/null; fi
+  elif [[ "$2" == 443 ]]; then curl -sk --noproxy "$1" --connect-timeout 3 --max-time 5 -o /dev/null "https://$1/"
+  else timeout 4 bash -c "exec 3<>/dev/tcp/$1/$2" 2>/dev/null; fi
 }
 
 validate_password "$ADMIN_PASSWORD"
 have_ocr || log "WARNING: tesseract not found; using fixed delays (less reliable). NTP_POLL_PROMPT=$NTP_POLL_PROMPT"
 if ! have_ocr && [[ "$NTP_POLL_PROMPT" == "auto" ]]; then
   log "ERROR: NTP_POLL_PROMPT=auto needs OCR; set yes (1.3.x) or no (1.2.x)"; exit 1
+fi
+
+export no_proxy="${no_proxy:+$no_proxy,}$MGMT_IP" NO_PROXY="${NO_PROXY:+$NO_PROXY,}$MGMT_IP"
+
+# Re-run safety: once applied, the console menu changes and admin/admin no longer works.
+if port_open "$MGMT_IP" 443 || port_open "$MGMT_IP" 22; then
+  log "$MGMT_IP already answers on 443/22; assuming Day 0 was applied earlier - skipping console setup"
+  echo "mgmt_ip=$MGMT_IP"; exit 0
 fi
 
 log "VM: $VM_NAME  IP: $MGMT_IP_CIDR  GW: $GATEWAY  DNS: $DNS_LIST  NTP: $NTP_LIST  domain: ${SEARCH_DOMAIN:-<default>}"
