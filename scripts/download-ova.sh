@@ -41,11 +41,21 @@ if [[ -n "$EXPECTED" ]] && (( AVAIL_KB < EXPECTED / 1024 + 1048576 )); then
 fi
 log "free space in $DIR: $((AVAIL_KB / 1048576)) GB"
 
-curl -fSL --retry 5 --retry-delay 10 --connect-timeout 30 -C - -o "$DIR/$FILE.part" "$URL"
-ACTUAL=$(stat -c %s "$DIR/$FILE.part" 2>/dev/null || stat -f %z "$DIR/$FILE.part")
+size_of() { stat -c %s "$1" 2>/dev/null || stat -f %z "$1" 2>/dev/null || echo 0; }
+
+# A complete .part from an earlier run (e.g. one that failed after downloading) is reused.
+if [[ -n "$EXPECTED" && -f "$DIR/$FILE.part" && "$(size_of "$DIR/$FILE.part")" == "$EXPECTED" ]]; then
+  log "Reusing complete partial download $DIR/$FILE.part"
+else
+  curl -fSL --retry 5 --retry-delay 10 --connect-timeout 30 -C - -o "$DIR/$FILE.part" "$URL"
+fi
+ACTUAL=$(size_of "$DIR/$FILE.part")
 if [[ -n "$EXPECTED" && "$ACTUAL" != "$EXPECTED" ]]; then
   log "ERROR: size mismatch (expected $EXPECTED, got $ACTUAL)"; exit 1
 fi
-tar -tf "$DIR/$FILE.part" | grep -q '\.ovf$' || { log "ERROR: $FILE is not a valid OVA (no .ovf inside)"; exit 1; }
+# No `grep -q` here: it closes the pipe early, tar gets SIGPIPE and pipefail fails the check.
+OVF=$(tar -tf "$DIR/$FILE.part" | grep '\.ovf$' || true)
+[[ -n "$OVF" ]] || { log "ERROR: $FILE is not a valid OVA (no .ovf inside)"; exit 1; }
+log "OVA contains $OVF"
 mv "$DIR/$FILE.part" "$DIR/$FILE"
 log "OVA cached: $DIR/$FILE ($ACTUAL bytes)"
