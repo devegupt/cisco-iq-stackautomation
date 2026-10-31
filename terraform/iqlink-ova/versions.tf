@@ -5,11 +5,21 @@ terraform {
       source  = "hashicorp/vsphere"
       version = "~> 2.6"
     }
+    external = {
+      source  = "hashicorp/external"
+      version = "~> 2.3"
+    }
   }
 }
 
-# Credentials come from the Stack Automation vCenter target, which injects
-# VSPHERE_SERVER / VSPHERE_USER / VSPHERE_PASSWORD (read by the provider).
+# Stack Automation's vCenter Provider stores a full URL (the form requires https://) and passes it
+# unchanged in VSPHERE_SERVER. The vSphere provider expects a hostname, so normalise it here.
+# User and password still come from VSPHERE_USER / VSPHERE_PASSWORD injected by the target.
+data "external" "vcenter" {
+  program = ["sh", "${path.module}/vsphere-host.sh"]
+}
+
 provider "vsphere" {
+  vsphere_server       = data.external.vcenter.result.host
   allow_unverified_ssl = var.allow_unverified_ssl
 }
